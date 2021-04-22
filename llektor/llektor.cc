@@ -201,6 +201,17 @@ bool llektor_pass_prune(Module& module) {
                 }
             }
             if (purge) {
+                for (auto insn = bb.getFirstNonPHI()->getNextNode(); insn != nullptr; insn = insn->getNextNode()) {
+                    auto prev = insn->getPrevNode();
+                    if (isa<LandingPadInst>(*prev)) {
+                        continue;
+                    }
+                    prev->replaceAllUsesWith(UndefValue::get(prev->getType()));
+                    prev->removeFromParent();
+                    for (int i = 0; i < prev->getNumOperands(); i++) {
+                        prev->setOperand(i, UndefValue::get(prev->getOperand(i)->getType()));
+                    }
+                }
                 for (auto succ: successors(&bb)) {
                     succ->removePredecessor(&bb);
 //                    for (auto phis = succ->()) {
