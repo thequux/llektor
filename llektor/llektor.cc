@@ -11,9 +11,18 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/Passes/PassPlugin.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/raw_os_ostream.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <err.h>
 
 using namespace llvm;
+
+static cl::opt<std::string> LLektorTracefile("llektor-tracefile",
+                                             cl::init(""),
+                                             cl::desc("Trace file to load"));
 
 static llvm::MDNode* get_integer_md(llvm::LLVMContext& ctx, uint32_t value) {
     auto val = llvm::ConstantInt::get(llvm::IntegerType::getInt32Ty(ctx), value, false);
@@ -135,7 +144,86 @@ void llektor_pass_instrument(Module& module) {
 
         ret_b.CreateRet(oldval);
     }
+}
 
+bool llektor_pass_prune(Module& module) {
+    raw_os_ostream ll_cerr(std::cerr);
+
+    auto mdstr = module.getNamedMetadata("llektor_modid")->getOperand(0)->getOperand(0).get();
+    auto moduleName = cast<MDString>(mdstr)->getString();
+
+
+    int fd = open(LLektorTracefile.c_str(), O_RDONLY);
+    if (fd == -1) {
+        err(1, "Failed to open llektor trace file");
+    }
+    uint8_t mod_hdr[24];
+    off_t fpos = 0, flen = lseek(fd, 0, SEEK_END);
+    uint8_t* trace_data = nullptr;
+    while (fpos < flen) {
+        pread(fd, mod_hdr, 24, fpos);
+        uint64_t sz = 0;
+        for (int i = 0; i < 8; i++) {
+            sz |= uint64_t(mod_hdr[i+16]) << (i*8);
+        }
+        if (sz == 0) {
+            break;
+        }
+        if (memcmp(moduleName.data(), mod_hdr, 16) == 0) {
+            // This is the droid we're looking for
+            trace_data = (uint8_t *)malloc(sz - 24);
+            pread(fd, trace_data, sz-24, fpos+24);
+            break;
+        }
+        fpos += sz;
+    }
+    close(fd);
+    if (trace_data == nullptr) {
+        // We don't have any info about this module :-(
+        return false;
+    }
+
+    for (auto &fn: module.functions()) {
+        Value *tbuf_val = nullptr;
+        bool had_purge = false;
+        for (auto &bb: fn.getBasicBlockList()) {
+            bool purge = false;
+            for (auto &insn: bb.getInstList()) {
+                if (insn.hasMetadata("llektor_bbno")) {
+                    auto meta = insn.getMetadata("llektor_bbno");
+                    auto bbno = cast<ConstantInt>(cast<ConstantAsMetadata>(meta->getOperand(0))->getValue());
+
+                    if (trace_data[bbno->getZExtValue()] == 0) {
+                        // Destroy the entire basic block
+                        purge = had_purge = true;
+                        break;
+                    }
+                }
+            }
+            if (purge) {
+                for (auto succ: successors(&bb)) {
+                    succ->removePredecessor(&bb);
+//                    for (auto phis = succ->()) {
+//                        phi.removeIncomingValue(&bb, false);
+//                        if (phi.getNumIncomingValues() == 0) {
+//                            phi.replaceAllUsesWith(UndefValue::get(phi.getType()));
+//                            phi.removeFromParent();
+//                        }
+//                    }
+                }
+                bb.getTerminator()->replaceAllUsesWith(UndefValue::get(bb.getTerminator()->getType()));
+                ReplaceInstWithInst(bb.getTerminator(), new UnreachableInst(module.getContext()));
+            }
+        }
+
+        if (had_purge) {
+//            fn.print(ll_cerr, nullptr, false, true);
+        }
+    }
+
+
+    free(trace_data);
+    return true;
 }
 
 llvm::PreservedAnalyses LLektorTagPass::run(llvm::Module &module, llvm::ModuleAnalysisManager &analysisManager) {
@@ -149,6 +237,7 @@ llvm::PreservedAnalyses LLektorInstrumentPass::run(llvm::Module &module, llvm::M
 }
 
 llvm::PreservedAnalyses LLektorPrunePass::run(llvm::Module &module, llvm::ModuleAnalysisManager &analysisManager) {
+    llektor_pass_prune(module);
     return llvm::PreservedAnalyses::none();
 }
 
@@ -162,6 +251,13 @@ static llvm::RegisterPass<LLektorTagPassLegacy> registration_tag(
 static llvm::RegisterPass<LLektorInstrumentPassLegacy> registration_instr(
         "llektor-instr",
         "LLektor: Instrument",
+        false,
+        false
+);
+
+static llvm::RegisterPass<LLektorPrunePassLegacy> registration_prune(
+        "llektor-prune",
+        "LLektor: Prune",
         false,
         false
 );
@@ -196,6 +292,11 @@ llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
 
 char LLektorTagPassLegacy::ID = 0;
 char LLektorInstrumentPassLegacy::ID = 0;
+char LLektorPrunePassLegacy::ID = 0;
+
+bool LLektorPrunePassLegacy::runOnModule(Module &M) {
+    return llektor_pass_prune(M);
+}
 
 bool LLektorTagPassLegacy::runOnModule(llvm::Module &M) {
     llektor_pass_tag(M);
