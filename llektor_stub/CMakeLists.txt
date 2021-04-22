@@ -1,0 +1,1 @@
+add_library(llektor_stub llektor_stub.c)

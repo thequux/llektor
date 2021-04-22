@@ -12,6 +12,13 @@ struct LLektorTagPassLegacy: public llvm::ModulePass {
     bool runOnModule(llvm::Module &M) override;
 };
 
+struct LLektorInstrumentPassLegacy: public llvm::ModulePass {
+    static char ID;
+    LLektorInstrumentPassLegacy(): llvm::ModulePass(ID) {}
+
+    bool runOnModule(llvm::Module &M) override;
+};
+
 class LLektorTagPass: public llvm::PassInfoMixin<LLektorTagPass>{
 public:
     static char ID;

@@ -34,5 +34,6 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS})
 
 add_subdirectory(llektor)
+add_subdirectory(llektor_stub)
 
 #add_llvm_loadable_module(LLektor library.cpp)
